@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Captures and exports — never commit traffic dumps
+*.pcap
+*.pcapng
+*.etl
+*.dump
+*.bin
+*.jsonl
+proc_sniffer_caps/
+exports/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
