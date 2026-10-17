@@ -115,6 +115,17 @@ Example prompt:
 > "Capture `chrome` for 30 seconds in full mode, export every outbound request including
 > plaintext HTTP, and list which domains/IPs it connected to."
 
+## Need a custom capture?
+
+If you need this adapted to a specific application — a connection inventory, an API
+endpoint map, or a reproducible capture script for your team — I take paid custom work.
+
+**Scope:** software you own or are authorized to analyze. I do not take work that
+captures third-party traffic without permission.
+
+**Contact:** open an issue with `[custom]` in the title, or email
+[2515196022@qq.com](mailto:2515196022@qq.com?subject=%5Bcustom%20capture%5D).
+
 ## Limitations
 
 - **L3/L4 does not decrypt HTTPS** — you get encrypted TLS bytes, not request bodies.
