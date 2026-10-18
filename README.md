@@ -2,22 +2,41 @@
 
 Capture **one process's network traffic** on Windows — by process name, not by interface.
 
-Wireshark on Windows cannot filter by process: capture happens below the socket layer, so packets carry no process semantics. `proc-sniffer` solves that by driving **`pktmon`** (built into Windows 10 1809+, records the PID natively at capture time), converting the ETL to pcapng, and filtering by PID — with an optional **mitmproxy** L7 layer that maps source port → PID to dump plaintext HTTP(S) for the target process only.
+Wireshark on Windows cannot filter by process: capture happens below the socket layer, so packets carry no process semantics. `proc-sniffer` solves that by driving **`pktmon`** (built into Windows 10 1809+) for the packets and **`Microsoft-Windows-Kernel-Network`** for the PID, then joining the two — with an optional **mitmproxy** L7 layer that maps source port → PID to dump plaintext HTTP(S) for the target process only.
 
 Ships as both a CLI and an **MCP server**, so an LLM agent can capture, stop and export traffic in one conversation.
 
 ```
 process name --psutil--> PID / local ports
-  L3/L4: pktmon (captures with PID) --> ETL --etl2pcapng--> pcapng --filter by PID--> filtered.pcap
+  L3/L4: pktmon (packets) + Kernel-Network ETW (PID per socket op)
+         --> ETL --etl2pcapng--> pcapng --join on 4-tuple--> filtered.pcap
   L7   : mitmproxy (proxy, filter by src port -> PID) --> http_traffic.jsonl
   export: requests.json / index.md / filtered.pcap / http_traffic.jsonl
 ```
+
+## How the PID attribution actually works
+
+This is the part most tools get wrong, so it is worth being precise:
+
+- `pktmon` records **packets**, not processes. Its ETL events carry `PktGroupId`, `PktNumber`, `ComponentId`, `Direction` — no PID. `pktmon etl2pcap` writes those packets into pcapng with a single interface block and **no process metadata**.
+- Wireshark has **no `_ws.process.id` field**. `tshark -G fields` on 4.6.x lists no such field, and `-Y "_ws.process.id == 1234"` fails with *"is not a valid protocol or protocol field"*.
+- What does carry a PID is the **`Microsoft-Windows-Kernel-Network`** ETW provider. Every TCP/UDP send, recv, connect and disconnect event includes `PID`, `saddr`, `sport`, `daddr`, `dport`.
+
+So the capture runs `pktmon start --capture --trace --provider Microsoft-Windows-Kernel-Network`, and the ETL ends up holding both the packets and the PID-tagged socket events. `tracerpt` exports the events to XML, `pktmon etl2pcap` exports the packets to pcapng, and the tool joins them on the 4-tuple.
+
+Two limits of that join, both reported in the export:
+
+- **`exact`** — the local `(ip, port)` endpoint was seen for the target PID. Precise.
+- **`peer`** — only the remote IP matches. This happens when the machine routes through a VPN/TUN adapter: ETW sees the tunnel-side 4-tuple, the physical NIC sees a NAT-rewritten one. The export counts these packets in `peer_only_packets` and warns in `index.md`, because traffic from *other* processes to the same server can leak in.
+
+For exact attribution on a VPN'd machine, bind the target's sockets to the physical adapter, or run the capture without the tunnel.
+
 
 ## Two layers
 
 | Layer | Tech | Output | Notes |
 |-------|------|--------|-------|
-| L3/L4 | `pktmon` full capture (PID-tagged) → `etl2pcapng` → filter by PID/port | `filtered.pcap` + `requests.json` (connection list) | Connection map + raw packets. No decryption. |
+| L3/L4 | `pktmon` packets + `Kernel-Network` ETW PIDs → `etl2pcap` → join on 4-tuple | `filtered.pcap` + `requests.json` (connection list) | Connection map + raw packets. No decryption. |
 | L7 | `mitmproxy` forward proxy, filtered by src-port → PID | `http_traffic.jsonl` (plaintext HTTP req/resp) | Target must use the proxy and trust the mitmproxy CA. |
 
 The `layers` argument picks a layer: `l3` / `l7` / `full` (default: both).
@@ -27,8 +46,7 @@ The `layers` argument picks a layer: `l3` / `l7` / `full` (default: both).
 - Windows 10 1809+ (`pktmon` is built in)
 - **Administrator** shell (packet capture + reading all processes' connections)
 - Python 3.10+
-- Optional: Wireshark, for exact PID filtering via `tshark`'s `_ws.process.id` metadata.
-  Without it, filtering falls back to a port map sampled during capture.
+- Wireshark is **not** required. Nothing depends on `tshark`.
 
 ## Install
 
@@ -46,7 +64,6 @@ Configuration is by environment variable, so nothing is hardcoded to one machine
 |---|---|---|
 | `PROC_SNIFFER_WORKDIR` | `~/proc_sniffer_caps` | Where captures and exports go |
 | `PROC_SNIFFER_ETL2PCAPNG` | `C:\tools\etl2pcapng.exe` | Path to `etl2pcapng.exe` |
-| `PROC_SNIFFER_TSHARK` | `C:\Program Files\Wireshark\tshark.exe` | Path to `tshark.exe` |
 | `PROC_SNIFFER_L7_PORT` | `8080` | mitmproxy listen port |
 
 ## CLI
@@ -129,9 +146,11 @@ captures third-party traffic without permission.
 ## Limitations
 
 - **L3/L4 does not decrypt HTTPS** — you get encrypted TLS bytes, not request bodies.
-- **PID filter precision** — with Wireshark installed, filtering uses `_ws.process.id`
-  metadata. Without it, a 1-second port sampler covers new connections; in rare cases
-  short-lived connections can be missed.
+- **PID filter precision** — attribution comes from `Kernel-Network` ETW events
+  joined to packets on the 4-tuple. Packets matched only by remote IP (VPN/NAT) are
+  counted in `peer_only_packets`; they may include other processes' traffic to the same
+  server. If no ETW events are parsed at all, the tool falls back to a 1-second port
+  sampler, which can miss short-lived connections.
 - **L7 needs the proxy** — traffic that bypasses `127.0.0.1:8080` (direct QUIC/UDP, for
   example) is invisible to the L7 layer, though L3/L4 still sees it.
 - **Pinning** — as above, requires Frida.
